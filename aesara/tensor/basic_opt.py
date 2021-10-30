@@ -3549,3 +3549,16 @@ def local_Shape_of_SpecifyShape(fgraph, node):
         return False
 
     return [specified_shape.owner.inputs[1]]
+
+
+@register_useless
+@register_canonicalize
+@local_optimizer([Shape_i])
+def local_Shape_i_of_broadcastable(fgraph, node):
+    """Replace ``shape_i(x, i)`` with ``1`` when ``x.broadcastable[i]`` is ``True``."""
+
+    if not isinstance(node.op, Shape_i):
+        return False
+
+    if node.inputs[0].broadcastable[node.op.i]:
+        return [as_tensor_variable(1, dtype=np.int64)]

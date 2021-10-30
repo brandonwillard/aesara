@@ -83,7 +83,7 @@ from aesara.tensor.math import sin, sinh, softplus, sqr, sqrt, sub
 from aesara.tensor.math import sum as aet_sum
 from aesara.tensor.math import tan, tanh, true_div, xor
 from aesara.tensor.math_opt import local_lift_transpose_through_dot
-from aesara.tensor.shape import Reshape, Shape_i, reshape, specify_shape
+from aesara.tensor.shape import Reshape, Shape_i, reshape, shape_i, specify_shape
 from aesara.tensor.subtensor import (
     AdvancedIncSubtensor1,
     Subtensor,
@@ -3187,6 +3187,17 @@ def test_local_Shape_of_SpecifyShape():
 
     assert x not in fgraph.variables
     assert shape in fgraph.variables
+
+
+def test_local_Shape_i_of_broadcastable():
+    x = tensor(np.float64, [False, True])
+    s = shape_i(x, 1)
+
+    fgraph = FunctionGraph(outputs=[s], clone=False)
+    _ = optimize_graph(fgraph, clone=False)
+
+    assert x not in fgraph.variables
+    assert fgraph.outputs[0].data == 1
 
 
 def test_assert_op_gradient():
