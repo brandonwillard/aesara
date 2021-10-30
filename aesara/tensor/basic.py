@@ -11,7 +11,7 @@ import warnings
 from collections.abc import Sequence
 from functools import partial
 from numbers import Number
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from numpy.core.multiarray import normalize_axis_index
@@ -2610,22 +2610,19 @@ def roll(x, shift, axis=None):
     return join(axis, x.__getitem__(tuple(front_list)), x.__getitem__(tuple(end_list)))
 
 
-def stack(*tensors, **kwargs):
-    """Stack tensors in sequence on given axis (default is 0).
+def stack(tensors: List[TensorVariable], axis: Optional[int] = None) -> TensorVariable:
+    """Join a sequence of arrays along a new axis.
 
-    Take a sequence of tensors and stack them on given axis to make a single
-    tensor. The size in dimension `axis` of the result will be equal to the number
-    of tensors passed.
-
-    Note: The interface stack(*tensors) is deprecated, you should use
-    stack(tensors, axis=0) instead.
+    The ``axis`` parameter specifies the index of the new axis in the
+    dimensions of the result. For example, if ``axis=0`` it will be the first
+    dimension and if ``axis=-1`` it will be the last dimension.
 
     Parameters
     ----------
-    tensors : list or tuple of tensors
-        A list of tensors to be stacked.
-    axis : int
-        The index of the new axis. Default value is 0.
+    tensors
+        Each array must have the same shape.
+    axis
+        The axis in the result array along which the input arrays are stacked.
 
     Examples
     --------
@@ -2657,61 +2654,17 @@ def stack(*tensors, **kwargs):
     >>> rval.shape # 3 tensors are stacked on axis -2
     (2, 2, 2, 3, 2)
     """
-    # ---> Remove this when moving to the new interface:
-    if not tensors and not kwargs:
-        raise ValueError("No tensor arguments provided")
-
-    if not kwargs and not isinstance(tensors[0], (list, tuple)):
-        warnings.warn(
-            "stack(*tensors) interface is deprecated, use"
-            " stack(tensors, axis=0) instead.",
-            DeprecationWarning,
-            stacklevel=3,
-        )
+    if axis is None:
         axis = 0
-    elif "tensors" in kwargs:
-        tensors = kwargs["tensors"]
-        if "axis" in kwargs:
-            axis = kwargs["axis"]
-        else:
-            axis = 0
-    else:
-        if len(tensors) == 2:
-            axis = tensors[1]
-        elif "axis" in kwargs:
-            axis = kwargs["axis"]
-        else:
-            axis = 0
-        tensors = tensors[0]
-    # <--- Until here.
+
+    try:
+        axis = get_scalar_constant_value(axis)
+    except NotScalarConstantError:
+        raise TypeError("Axis value must be an int or scalar constant")
 
     if len(tensors) == 0:
         raise ValueError("No tensor arguments provided")
 
-    # If all tensors are scalars of the same type, call make_vector.
-    # It makes the graph simpler, by not adding DimShuffles and Rebroadcasts
-
-    # This should be an optimization!
-    # Doing it here make the graph less canonicalized
-    # (more type need to be understood by all optimization)
-    # And DebugMode can't detect error in this code as it is not in an
-    # optimization.
-    # See ticket #660
-    if np.all(
-        [  # in case there is direct int in tensors.
-            isinstance(t, (np.number, float, int, builtins.complex))
-            or (
-                isinstance(t, Variable)
-                and isinstance(t.type, TensorType)
-                and t.ndim == 0
-            )
-            for t in tensors
-        ]
-    ):
-        # in case there is direct int
-        tensors = list(map(as_tensor_variable, tensors))
-        dtype = aes.upcast(*[i.dtype for i in tensors])
-        return MakeVector(dtype)(*tensors)
     return join(axis, *[shape_padaxis(t, axis) for t in tensors])
 
 

@@ -1,5 +1,4 @@
 import itertools
-import warnings
 from copy import copy, deepcopy
 from functools import partial
 from tempfile import mkstemp
@@ -534,7 +533,7 @@ class TestAsTensorVariable:
         a_vector = as_tensor_variable(x_vector)
         assert x_vector is a_vector
 
-    def test_make_vector(self):
+    def test_make_vector_and_stack(self):
         a = iscalar()
         x = aet.tile(a, (1, 1, 1))
         y = (constant(1, dtype="int64"), x.shape[2])
@@ -544,7 +543,7 @@ class TestAsTensorVariable:
 
         y = (1, x.shape[2])
         res = aet.as_tensor(y)
-        assert isinstance(res.owner.op, MakeVector)
+        assert isinstance(res.owner.op, Join)
 
     def test_multi_out(self):
         class TestOp(Op):
@@ -1025,37 +1024,19 @@ def test_get_vector_length():
 
 
 class TestJoinAndSplit:
-    # Split is tested by each verify_grad method.
     def setup_method(self):
         Join.debug = False
 
         self.mode = aesara.compile.get_default_mode().excluding("constant_folding")
-        self.join_op = Join()
-        self.split_op_class = Split
-        self.make_vector_op = MakeVector()
         self.floatX = config.floatX
         self.hide_error = config.mode not in [
             "DebugMode",
             "DEBUG_MODE",
             "FAST_COMPILE",
         ]
-        self.shared = shared
 
-    def eval_outputs_and_check_join(self, outputs):
+    def eval_outputs(self, outputs):
         f = aesara.function([], outputs, self.mode)
-        topo = f.maker.fgraph.toposort()
-        assert [True for node in topo if isinstance(node.op, type(self.join_op))]
-        variables = f()
-        if isinstance(variables, (tuple, list)) and len(variables) == 1:
-            return variables[0]
-        return variables
-
-    def eval_outputs_and_check_vector(self, outputs, make_vector_op=None):
-        if make_vector_op is None:
-            make_vector_op = self.make_vector_op
-        f = aesara.function([], outputs, self.mode)
-        topo = f.maker.fgraph.toposort()
-        assert [True for node in topo if isinstance(node.op, type(make_vector_op))]
         variables = f()
         if isinstance(variables, (tuple, list)) and len(variables) == 1:
             return variables[0]
@@ -1068,127 +1049,41 @@ class TestJoinAndSplit:
             join(0, a, b)
 
     def test_stack_mixed_type_constants(self):
-        # tested only on cpu as gpu support only float32
+        # Tested only on cpu since gpu only supports float32?
         a = as_tensor_variable(1)
         b = as_tensor_variable(2.0)
         c = aesara.shared(np.asarray(3.0, dtype=self.floatX))
         s = stack([a, b, c])
         want = np.array([1, 2, 3])
-        out = self.eval_outputs_and_check_vector([s], MakeVector())
+        out = self.eval_outputs([s])
         assert (out == want).all()
 
     def test_stack_scalar(self):
-        a = self.shared(np.asarray(1.0, dtype=self.floatX))
+        a = shared(np.asarray(1.0, dtype=self.floatX))
         b = as_tensor_variable(2.0)
         c = as_tensor_variable(3.0)
         s = stack([a, b, c])
 
         want = np.array([1, 2, 3])
-        out = self.eval_outputs_and_check_vector([s])
+        out = self.eval_outputs([s])
         assert (out == want).all()
 
-    def test_stack_scalar_make_vector(self):
-        # Test that calling stack() on scalars instantiates MakeVector,
-        # not Join. Test that the floatX dtype stay floatX, not downcasted
-        # to int64
-        a = scalar("a", dtype=self.floatX)
-        b = scalar("b", dtype=self.floatX)
-        s = stack([a, b, a, b])
-        f = function([a, b], s, mode=self.mode)
-        val = f(1, 2)
-        # print val
-        assert np.all(val == [1, 2, 1, 2])
-        topo = f.maker.fgraph.toposort()
-        assert len([n for n in topo if isinstance(n.op, MakeVector)]) > 0
-        assert len([n for n in topo if isinstance(n, type(self.join_op))]) == 0
-        assert f.maker.fgraph.outputs[0].dtype == self.floatX
-
-    def test_stack_scalar_make_vector_dtype(self):
-        # Test that calling stack() on scalars instantiates MakeVector,
-        # event when the scalar don't have the same dtype.
-        a = iscalar("a")
-        b = lscalar("b")
-        s = stack([a, b, a, b])
-        f = function([a, b], s, mode=self.mode)
-        val = f(1, 2)
-        assert np.all(val == [1, 2, 1, 2])
-        topo = f.maker.fgraph.toposort()
-        assert len([n for n in topo if isinstance(n.op, MakeVector)]) > 0
-        assert len([n for n in topo if isinstance(n, type(self.join_op))]) == 0
-        assert f.maker.fgraph.outputs[0].dtype == "int64"
-
-    def test_stack_scalar_make_vector_constant(self):
-        # Test that calling stack() on scalars instantiates MakeVector,
-        # event when the scalar are simple int type.
-        a = iscalar("a")
-        b = lscalar("b")
-        # test when the constant is the first element.
-        # The first element is used in a special way
-        s = stack([10, a, b, np.int8(3)])
-        f = function([a, b], s, mode=self.mode)
-        val = f(1, 2)
-        assert np.all(val == [10, 1, 2, 3])
-        topo = f.maker.fgraph.toposort()
-        assert len([n for n in topo if isinstance(n.op, MakeVector)]) > 0
-        assert len([n for n in topo if isinstance(n, type(self.join_op))]) == 0
-        assert f.maker.fgraph.outputs[0].dtype == "int64"
-
-    def test_stack_new_interface(self):
-        # Test the new numpy-like interface: stack(tensors, axis=0).
-
-        # Testing against old interface
-        warnings.simplefilter("always", DeprecationWarning)
+    def test_stack_arguments(self):
         a = imatrix("a")
         b = imatrix("b")
-        s1 = stack(a, b)
-        s2 = stack([a, b])
-        f = function([a, b], [s1, s2], mode=self.mode)
-        v1, v2 = f([[1, 2]], [[3, 4]])
-        assert v1.shape == v2.shape
-        assert np.all(v1 == v2)
-        # Testing axis parameter
-        s3 = stack([a, b], 1)
-        f = function([a, b], s3, mode=self.mode)
-        v3 = f([[1, 2]], [[3, 4]])
-        v4 = np.array([[[1, 2], [3, 4]]])
-        assert v3.shape == v4.shape
-        assert np.all(v3 == v4)
-        # Testing negative axis
-        v1 = [[1, 2, 3], [4, 5, 6]]
-        v2 = [[7, 8, 9], [10, 11, 12]]
-        s = stack([a, b], axis=-1)
-        f = function([a, b], s, mode=self.mode)
-        v = np.zeros((2, 3, 2))
-        v[:, :, 0] = v1
-        v[:, :, 1] = v2
-        out = f(v1, v2)
-        assert v.shape == out.shape
-        assert np.all(v == out)
-        s = stack([a, b], axis=-2)
-        f = function([a, b], s, mode=self.mode)
-        v = np.zeros((2, 2, 3))
-        v[:, 0, :] = v1
-        v[:, 1, :] = v2
-        out = f(v1, v2)
-        assert v.shape == out.shape
-        assert np.all(v == out)
+
+        with pytest.raises(TypeError):
+            stack([a, b], iscalar())
+
+        with pytest.raises(ValueError):
+            stack([])
+
         # Testing out-of-bounds axis
         with pytest.raises(IndexError):
             stack([a, b], 4)
+
         with pytest.raises(IndexError):
             stack([a, b], -4)
-        # Testing depreciation warning
-        with warnings.catch_warnings(record=True) as w:
-            s = stack(a, b)
-            assert len(w) == 1
-            assert issubclass(w[-1].category, DeprecationWarning)
-        with warnings.catch_warnings(record=True) as w:
-            s = stack([a, b])
-            s = stack([a, b], 1)
-            s = stack([a, b], axis=1)
-            s = stack(tensors=[a, b])
-            s = stack(tensors=[a, b], axis=1)
-            assert not w
 
     def test_stack_hessian(self):
         # Test the gradient of stack when used in hessian, see gh-1589
@@ -1241,19 +1136,19 @@ class TestJoinAndSplit:
         assert isinstance(topo[0].op, DeepCopyOp)
 
     def test_join_vector(self):
-        a = self.shared(np.array([1, 2, 3], dtype=self.floatX))
+        a = shared(np.array([1, 2, 3], dtype=self.floatX))
         b = as_tensor_variable(np.array([7, 8, 9], dtype=self.floatX))
 
         s = join(0, a, b)
         want = np.array([1, 2, 3, 7, 8, 9])
-        out = self.eval_outputs_and_check_join([s])
+        out = self.eval_outputs([s])
         assert (out == want).all()
 
     def test_roll(self):
 
         for get_shift in [lambda a: a, lambda x: aesara.shared(x)]:
             # Test simple 1D example
-            a = self.shared(np.array([1, 2, 3, 4, 5, 6], dtype=self.floatX))
+            a = shared(np.array([1, 2, 3, 4, 5, 6], dtype=self.floatX))
             b = roll(a, get_shift(2))
             want = np.array([5, 6, 1, 2, 3, 4])
             out = aesara.function([], b)()
@@ -1268,7 +1163,7 @@ class TestJoinAndSplit:
             assert (out == want).all()
 
             # Test 2D example - ensure that behavior matches np.roll behavior
-            a = self.shared(np.arange(21).reshape((3, 7)).astype(self.floatX))
+            a = shared(np.arange(21).reshape((3, 7)).astype(self.floatX))
             b = roll(a, get_shift(-2), 1)
 
             want = np.roll(a.get_value(borrow=True), -2, 1)
@@ -1277,7 +1172,7 @@ class TestJoinAndSplit:
             assert (out == want).all()
 
             # Test example when axis < 0 - ensure that behavior matches np.roll behavior
-            a = self.shared(np.arange(24).reshape((3, 2, 4)).astype(self.floatX))
+            a = shared(np.arange(24).reshape((3, 2, 4)).astype(self.floatX))
             b = roll(a, get_shift(-2), -2)
 
             want = np.roll(a.get_value(borrow=True), -2, -2)
@@ -1316,89 +1211,87 @@ class TestJoinAndSplit:
             assert (out == want).all()
 
     def test_stack_vector(self):
-        a = self.shared(np.array([1, 2, 3], dtype=self.floatX))
+        a = shared(np.array([1, 2, 3], dtype=self.floatX))
         b = as_tensor_variable(np.array([7, 8, 9], dtype=self.floatX))
 
         s = stack([a, b])
         want = np.array([[1, 2, 3], [7, 8, 9]])
-        out = self.eval_outputs_and_check_join([s])
+        out = self.eval_outputs([s])
         assert (out == want).all()
 
     def test_join_matrix0(self):
-        a = self.shared(np.array([[1, 2, 3], [4, 5, 6]], dtype=self.floatX))
+        a = shared(np.array([[1, 2, 3], [4, 5, 6]], dtype=self.floatX))
         b = as_tensor_variable(np.array([[7, 8, 9]], dtype=self.floatX))
         s = join(0, a, b)
 
         want = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9]])
-        out = self.eval_outputs_and_check_join([s])
+        out = self.eval_outputs([s])
         assert (out == want).all()
 
     def test_join_matrix1(self):
         av = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype="float32")
         bv = np.array([[0.7], [0.8]], dtype="float32")
-        a = self.shared(av)
+        a = shared(av)
         b = as_tensor_variable(bv)
         s = join(1, a, b)
         want = np.array([[0.1, 0.2, 0.3, 0.7], [0.4, 0.5, 0.6, 0.8]], dtype="float32")
-        out = self.eval_outputs_and_check_join([s])
+        out = self.eval_outputs([s])
         assert (out == want).all()
 
         utt.verify_grad(lambda a, b: join(1, a, b), [av, bv], mode=self.mode)
 
+    @pytest.mark.skipif(
+        "float32" in shared.__name__,
+        reason="The shared variable constructor needs to support dtypes other than float32",
+    )
     def test_join_matrix_dtypes(self):
-        if "float32" in self.shared.__name__:
-            pytest.skip(
-                "The shared variable constructor"
-                " need to support other dtype then float32"
-            )
         # Test mixed dtype. There was a bug that caused crash in the past.
         av = np.array([[1, 2, 3], [4, 5, 6]], dtype="int8")
         bv = np.array([[7], [8]], dtype="float32")
-        a = self.shared(av)
+        a = shared(av)
         b = as_tensor_variable(bv)
         s = join(1, a, b)
         want = np.array([[1, 2, 3, 7], [4, 5, 6, 8]], dtype="float32")
-        out = self.eval_outputs_and_check_join([s])
+        out = self.eval_outputs([s])
         assert (out == want).all()
 
         grad(s.sum(), b)
         grad(s.sum(), a)
         utt.verify_grad(lambda b: join(1, a, b), [bv], eps=1.0e-2, mode=self.mode)
 
+    @pytest.mark.skipif(
+        "float32" in shared.__name__,
+        reason="The shared variable constructor needs to support dtypes other than float32",
+    )
     def test_join_matrix_ints(self):
-        if "float32" in self.shared.__name__:
-            pytest.skip(
-                "The shared variable constructor"
-                " need to support other dtype then float32"
-            )
         # Test mixed dtype. There was a bug that caused crash in the past.
         av = np.array([[1, 2, 3], [4, 5, 6]], dtype="int8")
         bv = np.array([[7], [8]], dtype="int32")
-        a = self.shared(av)
+        a = shared(av)
         b = as_tensor_variable(bv)
         s = join(1, a, b)
         want = np.array([[1, 2, 3, 7], [4, 5, 6, 8]], dtype="float32")
-        out = self.eval_outputs_and_check_join([s])
+        out = self.eval_outputs([s])
         assert (out == want).all()
 
         assert (np.asarray(grad(s.sum(), b).eval()) == 0).all()
         assert (np.asarray(grad(s.sum(), a).eval()) == 0).all()
 
     def test_join_matrix1_using_vertical_stack(self):
-        a = self.shared(np.array([[1, 2, 3], [4, 5, 6]], dtype=self.floatX))
+        a = shared(np.array([[1, 2, 3], [4, 5, 6]], dtype=self.floatX))
         b = as_tensor_variable(np.array([[7, 8, 9]], dtype=self.floatX))
         c = as_tensor_variable(np.array([[9, 8, 7]], dtype=self.floatX))
         s = vertical_stack(a, b, c)
 
         want = np.array([[1, 2, 3], [4, 5, 6], [7, 8, 9], [9, 8, 7]])
-        out = self.eval_outputs_and_check_join([s])
+        out = self.eval_outputs([s])
         assert (out == want).all()
 
     def test_join_matrix1_using_horizontal_stack(self):
         av = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype="float32")
         bv = np.array([[0.7], [0.8]], dtype="float32")
         cv = np.array([[0.3, 0.2, 0.1], [0.6, 0.5, 0.4]], dtype="float32")
-        a = self.shared(av)
+        a = shared(av)
         b = as_tensor_variable(bv)
         c = as_tensor_variable(cv)
         s = horizontal_stack(a, b, c)
@@ -1406,7 +1299,7 @@ class TestJoinAndSplit:
             [[0.1, 0.2, 0.3, 0.7, 0.3, 0.2, 0.1], [0.4, 0.5, 0.6, 0.8, 0.6, 0.5, 0.4]],
             dtype="float32",
         )
-        out = self.eval_outputs_and_check_join([s])
+        out = self.eval_outputs([s])
         assert (out == want).all()
 
         utt.verify_grad(lambda a, b: join(1, a, b), [av, bv], mode=self.mode)
@@ -1414,14 +1307,14 @@ class TestJoinAndSplit:
     def test_join_matrixV(self):
         # variable join axis
         v = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=self.floatX)
-        a = self.shared(v)
+        a = shared(v)
         b = as_tensor_variable(v)
         ax = lscalar()
         s = join(ax, a, b)
 
         f = inplace_func([ax], [s], mode=self.mode)
         topo = f.maker.fgraph.toposort()
-        assert [True for node in topo if isinstance(node.op, type(self.join_op))]
+        assert [True for node in topo if isinstance(node.op, Join)]
 
         want = np.array(
             [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
@@ -1441,14 +1334,14 @@ class TestJoinAndSplit:
     def test_join_matrixV_negative_axis(self):
         # variable join negative axis
         v = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=self.floatX)
-        a = self.shared(v)
+        a = shared(v)
         b = as_tensor_variable(v)
         ax = lscalar()
         s = join(ax, a, b)
 
         f = inplace_func([ax], [s], mode=self.mode)
         topo = f.maker.fgraph.toposort()
-        assert [True for node in topo if isinstance(node.op, type(self.join_op))]
+        assert [True for node in topo if isinstance(node.op, Join)]
 
         want = np.array(
             [[0.1, 0.2, 0.3, 0.1, 0.2, 0.3], [0.4, 0.5, 0.6, 0.4, 0.5, 0.6]]
@@ -1469,13 +1362,13 @@ class TestJoinAndSplit:
     def test_join_matrixC_negative_axis(self):
         # constant join negative axis
         v = np.array([[0.1, 0.2, 0.3], [0.4, 0.5, 0.6]], dtype=self.floatX)
-        a = self.shared(v)
+        a = shared(v)
         b = as_tensor_variable(v)
 
         s = join(-1, a, b)
         f = aesara.function([], [s], mode=self.mode)
         topo = f.maker.fgraph.toposort()
-        assert [True for node in topo if isinstance(node.op, type(self.join_op))]
+        assert [True for node in topo if isinstance(node.op, Join)]
 
         want = np.array(
             [[0.1, 0.2, 0.3, 0.1, 0.2, 0.3], [0.4, 0.5, 0.6, 0.4, 0.5, 0.6]]
@@ -1487,7 +1380,7 @@ class TestJoinAndSplit:
         s = join(-2, a, b)
         f = aesara.function([], [s], mode=self.mode)
         topo = f.maker.fgraph.toposort()
-        assert [True for node in topo if isinstance(node.op, type(self.join_op))]
+        assert [True for node in topo if isinstance(node.op, Join)]
 
         want = np.array(
             [[0.1, 0.2, 0.3], [0.4, 0.5, 0.6], [0.1, 0.2, 0.3], [0.4, 0.5, 0.6]]
@@ -1509,25 +1402,25 @@ class TestJoinAndSplit:
         a_val = rng.random((1, 4, 1)).astype(self.floatX)
         b_val = rng.random((1, 3, 1)).astype(self.floatX)
 
-        a = self.shared(a_val, broadcastable=(False, False, True))
-        b = self.shared(b_val, broadcastable=(True, False, True))
-        c = self.join_op(1, a, b)
+        a = shared(a_val, broadcastable=(False, False, True))
+        b = shared(b_val, broadcastable=(True, False, True))
+        c = join(1, a, b)
         assert c.type.broadcastable[0] and c.type.broadcastable[2]
         assert not c.type.broadcastable[1]
 
         # Opt can remplace the int by an Aesara constant
-        c = self.join_op(constant(1), a, b)
+        c = join(constant(1), a, b)
         assert c.type.broadcastable[0] and c.type.broadcastable[2]
         assert not c.type.broadcastable[1]
 
         # In case futur opt insert other useless stuff
-        c = self.join_op(cast(constant(1), dtype="int32"), a, b)
+        c = join(cast(constant(1), dtype="int32"), a, b)
         assert c.type.broadcastable[0] and c.type.broadcastable[2]
         assert not c.type.broadcastable[1]
 
         f = function([], c, mode=self.mode)
         topo = f.maker.fgraph.toposort()
-        assert [True for node in topo if isinstance(node.op, type(self.join_op))]
+        assert any([True for node in topo if isinstance(node.op, Join)])
 
         f()
         utt.verify_grad(
@@ -1547,14 +1440,14 @@ class TestJoinAndSplit:
         a_val = rng.random((2, 4, 1)).astype(self.floatX)
         b_val = rng.random((1, 4, 1)).astype(self.floatX)
 
-        a = self.shared(a_val, broadcastable=(False, False, True))
-        b = self.shared(b_val, broadcastable=(True, False, True))
-        c = self.join_op(0, a, b)
+        a = shared(a_val, broadcastable=(False, False, True))
+        b = shared(b_val, broadcastable=(True, False, True))
+        c = join(0, a, b)
         assert not c.type.broadcastable[0]
 
         f = function([], c, mode=self.mode)
         topo = f.maker.fgraph.toposort()
-        assert [True for node in topo if isinstance(node.op, type(self.join_op))]
+        assert any([True for node in topo if isinstance(node.op, Join)])
 
         f()
         utt.verify_grad(
@@ -1566,7 +1459,7 @@ class TestJoinAndSplit:
             b.set_value(rng.random((3, 4, 1)).astype(self.floatX))
         a = TensorType(dtype=self.floatX, broadcastable=[0, 0, 1])()
         b = TensorType(dtype=self.floatX, broadcastable=[1, 0, 1])()
-        c = self.join_op(0, a, b)
+        c = join(0, a, b)
         f = function([a, b], c, mode=self.mode)
         bad_b_val = rng.random((3, 4, 1)).astype(self.floatX)
         with pytest.raises(TypeError):
@@ -1580,14 +1473,14 @@ class TestJoinAndSplit:
         a_val = rng.random((1, 4, 1)).astype(self.floatX)
         b_val = rng.random((1, 4, 1)).astype(self.floatX)
 
-        a = self.shared(a_val, broadcastable=(True, False, True))
-        b = self.shared(b_val, broadcastable=(True, False, True))
-        c = self.join_op(0, a, b)
+        a = shared(a_val, broadcastable=(True, False, True))
+        b = shared(b_val, broadcastable=(True, False, True))
+        c = join(0, a, b)
         assert not c.type.broadcastable[0]
 
         f = function([], c, mode=self.mode)
         topo = f.maker.fgraph.toposort()
-        assert [True for node in topo if isinstance(node.op, type(self.join_op))]
+        assert [True for node in topo if isinstance(node.op, Join)]
 
         f()
         utt.verify_grad(
@@ -1599,8 +1492,8 @@ class TestJoinAndSplit:
         # single-input join.
         rng = np.random.default_rng(seed=utt.fetch_seed())
         a_val = rng.random((1, 4, 1)).astype(self.floatX)
-        a = self.shared(a_val, broadcastable=(True, False, True))
-        b = self.join_op(0, a)
+        a = shared(a_val, broadcastable=(True, False, True))
+        b = join(0, a)
         assert b.type.broadcastable[0]
         assert b.type.broadcastable[2]
         assert not b.type.broadcastable[1]
@@ -1608,9 +1501,7 @@ class TestJoinAndSplit:
         f = function([], b, mode=self.mode)
         topo = f.maker.fgraph.toposort()
         if config.mode != "FAST_COMPILE":
-            assert not [
-                True for node in topo if isinstance(node.op, type(self.join_op))
-            ]
+            assert not [True for node in topo if isinstance(node.op, Join)]
 
         f()
         utt.verify_grad((lambda a: join(0, a)), [a_val], rng=rng, mode=self.mode)
@@ -1628,19 +1519,19 @@ class TestJoinAndSplit:
         c = TensorType(dtype=self.floatX, broadcastable=[1, 0, 0, 0, 0, 0])()
         d = TensorType(dtype=self.floatX, broadcastable=[1, 0, 1, 1, 0, 1])()
         e = TensorType(dtype=self.floatX, broadcastable=[1, 0, 1, 0, 0, 1])()
-        f = self.join_op(0, a, b, c, d, e)
+        f = join(0, a, b, c, d, e)
         fb = f.type.broadcastable
         assert not fb[0] and fb[1] and fb[2] and fb[3] and not fb[4] and fb[5]
-        g = self.join_op(1, a, b, c, d, e)
+        g = join(1, a, b, c, d, e)
         gb = g.type.broadcastable
         assert gb[0] and not gb[1] and gb[2] and gb[3] and not gb[4] and gb[5]
-        h = self.join_op(4, a, b, c, d, e)
+        h = join(4, a, b, c, d, e)
         hb = h.type.broadcastable
         assert hb[0] and hb[1] and hb[2] and hb[3] and not hb[4] and hb[5]
 
         f = function([a, b, c, d, e], f, mode=self.mode)
         topo = f.maker.fgraph.toposort()
-        assert [True for node in topo if isinstance(node.op, type(self.join_op))]
+        assert any([True for node in topo if isinstance(node.op, Join)])
 
         rng = np.random.default_rng(seed=utt.fetch_seed())
         a_val = rng.random((1, 1, 1, 1, 2, 1)).astype(self.floatX)
@@ -1688,12 +1579,12 @@ class TestJoinAndSplit:
         def get_mat(s1, s2):
             return np.asarray(np.random.uniform(size=(s1, s2)), dtype=self.floatX)
 
-        x1 = self.shared(get_mat(3, 4))
-        x2 = self.shared(get_mat(2, 4))
-        x3 = self.shared(get_mat(1, 4))
+        x1 = shared(get_mat(3, 4))
+        x2 = shared(get_mat(2, 4))
+        x3 = shared(get_mat(1, 4))
 
         # Test dim 0
-        z = self.join_op(0, x1, x2, x3)
+        z = join(0, x1, x2, x3)
         f = aesara.function([], z.shape, mode=self.mode)
         topo = f.maker.fgraph.toposort()
 
@@ -1701,22 +1592,22 @@ class TestJoinAndSplit:
         assert (out == [6, 4]).all()
 
         if config.mode != "FAST_COMPILE":
-            for node in f.maker.fgraph.toposort():
-                assert not isinstance(node.op, type(self.join_op))
+            assert not any(
+                [isinstance(node.op, Join) for node in f.maker.fgraph.toposort()]
+            )
 
         # Test dim 1
         x1.set_value(get_mat(3, 4))
         x2.set_value(get_mat(3, 4))
         x3.set_value(get_mat(3, 5))
-        z = self.join_op(1, x1, x2, x3)
+        z = join(1, x1, x2, x3)
         f = aesara.function([], z.shape, mode=self.mode)
         topo = f.maker.fgraph.toposort()
         out = f()
         assert (out == [3, 13]).all()
 
         if config.mode != "FAST_COMPILE":
-            for node in topo:
-                assert not isinstance(node.op, type(self.join_op))
+            assert not any([isinstance(node.op, Join) for node in topo])
 
         with config.change_flags(compute_test_value="off"):
             # Test hide error
@@ -1741,38 +1632,35 @@ class TestJoinAndSplit:
 
         # In the past it was broken on the GPU.
         rng = np.random.default_rng(seed=utt.fetch_seed())
-        T_shared = self.shared(rng.random((3, 4)).astype(self.floatX))
+        T_shared = shared(rng.random((3, 4)).astype(self.floatX))
         Tout = aet.concatenate([T_shared, T_shared])
         f = function([], Tout, mode=self.mode)
         out = f()
         if config.mode != "FAST_COMPILE":
-            assert [
-                True
-                for node in f.maker.fgraph.toposort()
-                if isinstance(node.op, type(self.join_op))
-            ]
+            assert any(
+                [
+                    True
+                    for node in f.maker.fgraph.toposort()
+                    if isinstance(node.op, Join)
+                ]
+            )
         assert np.allclose(
             out, np.concatenate([T_shared.get_value(), T_shared.get_value()])
         )
 
     def test_mixed_ndim_error(self):
         rng = np.random.default_rng(seed=utt.fetch_seed())
-        v = self.shared(rng.random((4)).astype(self.floatX))
-        m = self.shared(rng.random((4, 4)).astype(self.floatX))
+        v = shared(rng.random((4)).astype(self.floatX))
+        m = shared(rng.random((4, 4)).astype(self.floatX))
         with pytest.raises(TypeError):
-            self.join_op(0, v, m)
+            join(0, v, m)
 
     def test_split_0elem(self):
         rng = np.random.default_rng(seed=utt.fetch_seed())
-        m = self.shared(rng.random((4, 6)).astype(self.floatX))
-        o = self.split_op_class(2)(m, 0, [4, 0])
+        m = shared(rng.random((4, 6)).astype(self.floatX))
+        o = Split(2)(m, 0, [4, 0])
         f = function([], o, mode=self.mode)
-        assert any(
-            [
-                isinstance(node.op, self.split_op_class)
-                for node in f.maker.fgraph.toposort()
-            ]
-        )
+        assert any([isinstance(node.op, Split) for node in f.maker.fgraph.toposort()])
         o1, o2 = f()
         assert np.allclose(o1, m.get_value(borrow=True))
         assert np.allclose(o2, m.get_value(borrow=True)[4:])
@@ -1780,15 +1668,10 @@ class TestJoinAndSplit:
     @config.change_flags(compute_test_value="off")
     def test_split_neg(self):
         rng = np.random.default_rng(seed=utt.fetch_seed())
-        m = self.shared(rng.random((4, 6)).astype(self.floatX))
-        o = self.split_op_class(2)(m, 0, [5, -1])
+        m = shared(rng.random((4, 6)).astype(self.floatX))
+        o = Split(2)(m, 0, [5, -1])
         f = function([], o, mode=self.mode)
-        assert any(
-            [
-                isinstance(node.op, self.split_op_class)
-                for node in f.maker.fgraph.toposort()
-            ]
-        )
+        assert any([isinstance(node.op, Split) for node in f.maker.fgraph.toposort()])
         with pytest.raises(ValueError):
             f()
 

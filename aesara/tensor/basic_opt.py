@@ -2392,6 +2392,35 @@ def apply_rebroadcast_opt(rval):
 
 @register_specialize
 @register_canonicalize
+@local_optimizer([Join])
+def local_join_to_MakeVector(fgraph, node):
+    r"""Convert `Join`\s containing only scalars of the same type to `MakeVector`\s.
+
+    It makes graphs simpler by avoiding `DimShuffle`\s and `Rebroadcast`\s.
+    """
+    if not isinstance(node.op, Join):
+        return
+
+    tensors = node.inputs[1:]
+
+    if all(
+        t.ndim == 1
+        and (
+            t.owner
+            and isinstance(t.owner.op, DimShuffle)
+            and t.owner.op.new_order == ("x",)
+            and t.owner.inputs[0].ndim == 0
+        )
+        for t in tensors
+    ):
+        dtype = aes.upcast(*[i.dtype for i in tensors])
+        return [MakeVector(dtype)(*[t.owner.inputs[0] for t in tensors])]
+
+    return False
+
+
+@register_specialize
+@register_canonicalize
 @register_useless
 @local_optimizer([Join])
 def local_join_1(fgraph, node):

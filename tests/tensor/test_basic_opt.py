@@ -2715,6 +2715,20 @@ def test_local_join_1():
     assert f.maker.fgraph.outputs[0].dtype == config.floatX
 
 
+@pytest.mark.parametrize(
+    "a, b",
+    [
+        (scalar(), scalar()),
+        (iscalar(), scalar()),
+    ],
+)
+def test_local_join_to_MakeVector(a, b):
+    s = aet.stack([a, b])
+    f = function([a, b], s, mode=mode_opt.including("local_join_to_MakeVector"))
+    (out,) = f.maker.fgraph.outputs
+    assert isinstance(out.owner.op, MakeVector)
+
+
 def test_local_join_empty():
     # test for vector, vector, empty to vector
     empty_vec = np.asarray([], dtype=config.floatX)
