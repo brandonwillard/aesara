@@ -10,8 +10,9 @@ from aesara.compile.function import function
 from aesara.compile.mode import Mode, get_default_mode, get_mode
 from aesara.compile.ops import DeepCopyOp
 from aesara.configdefaults import config
-from aesara.graph.basic import Variable, ancestors
+from aesara.graph.basic import Constant, Variable, ancestors
 from aesara.graph.opt import check_stack_trace
+from aesara.graph.opt_utils import optimize_graph
 from aesara.tensor import inplace
 from aesara.tensor.basic import (
     Alloc,
@@ -33,7 +34,10 @@ from aesara.tensor.subtensor import (
     inc_subtensor,
     set_subtensor,
 )
-from aesara.tensor.subtensor_opt import local_replace_AdvancedSubtensor
+from aesara.tensor.subtensor_opt import (
+    local_replace_AdvancedSubtensor,
+    local_subtensor_shape_constant,
+)
 from aesara.tensor.type import (
     bmatrix,
     col,
@@ -41,6 +45,7 @@ from aesara.tensor.type import (
     fmatrix,
     iscalar,
     ivector,
+    lscalar,
     lscalars,
     matrix,
     row,
@@ -1992,3 +1997,34 @@ def test_local_subtensor_of_alloc():
                     assert not isinstance(f.maker.fgraph.toposort()[-1].op, Subtensor)
                 val = f(xval)
                 assert xval.__getitem__(slices).shape == val.shape
+
+
+def test_local_subtensor_shape_constant():
+    x = tensor(np.float64, [True, False]).shape[0]
+    (res,) = local_subtensor_shape_constant.transform(None, x.owner)
+    assert isinstance(res, Constant)
+    assert res.data == 1
+
+    # Make sure it's part of the canonicalizations
+    res = optimize_graph(x)
+    assert isinstance(res, Constant)
+    assert res.data == 1
+
+    x = tensor(np.float64, [True, False]).shape[lscalar()]
+    assert not local_subtensor_shape_constant.transform(None, x.owner)
+
+    x = tensor(np.float64, [True, False]).shape[0:]
+    assert not local_subtensor_shape_constant.transform(None, x.owner)
+
+    x = tensor(np.float64, [True, False]).shape[lscalar() :]
+    assert not local_subtensor_shape_constant.transform(None, x.owner)
+
+    x = tensor(np.float64, [True, True]).shape[1:]
+    (res,) = local_subtensor_shape_constant.transform(None, x.owner)
+    assert isinstance(res, Constant)
+    assert np.array_equal(res.data, [1])
+
+    x = tensor(np.float64, [False, True, True]).shape[1:]
+    (res,) = local_subtensor_shape_constant.transform(None, x.owner)
+    assert isinstance(res, Constant)
+    assert np.array_equal(res.data, [1, 1])
