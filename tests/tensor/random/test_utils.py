@@ -4,7 +4,7 @@ import pytest
 from aesara import config, function
 from aesara.compile.mode import Mode
 from aesara.graph.optdb import OptimizationQuery
-from aesara.tensor.random.utils import RandomStream, broadcast_params
+from aesara.tensor.random.utils import RandomStream, broadcast_params, default_rng
 from aesara.tensor.type import matrix, tensor
 from tests import unittest_tools as utt
 
@@ -13,7 +13,7 @@ from tests import unittest_tools as utt
 def set_aesara_flags():
     opts = OptimizationQuery(include=[None], exclude=[])
     py_mode = Mode("py", opts)
-    with config.change_flags(mode=py_mode, compute_test_value="warn"):
+    with config.change_flags(mode=py_mode):
         yield
 
 
@@ -272,3 +272,30 @@ class TestSharedRandomStream:
             su2[0].set_value(su1[0].get_value())
 
         np.testing.assert_array_almost_equal(f1(), f2(), decimal=6)
+
+
+@pytest.mark.parametrize("shared", [True, False])
+def test_default_rng(shared):
+    seed = utt.fetch_seed()
+    rng = default_rng(seed, shared=shared)
+
+    assert hasattr(rng, "standard_normal")
+
+    updates = rng.updates() if shared else None
+    outputs = [rng.uniform(0, 1, size=(2, 2)), rng.uniform(0, 1, size=(2, 2))]
+    fn = function([], outputs, updates=updates)
+
+    fn_val0, fn_val1 = fn()
+
+    rng_seed = np.random.SeedSequence(seed)
+
+    (seed_seq,) = rng_seed.spawn(1)
+    np_rng = np.random.default_rng(seed_seq)
+    numpy_val0 = np_rng.uniform(0, 1, size=(2, 2))
+
+    (seed_seq,) = rng_seed.spawn(1)
+    np_rng = np.random.default_rng(seed_seq)
+    numpy_val1 = np_rng.uniform(0, 1, size=(2, 2))
+
+    assert np.allclose(fn_val0, numpy_val0)
+    assert np.allclose(fn_val1, numpy_val1)

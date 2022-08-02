@@ -927,7 +927,7 @@ class TestScan:
 
         rng_seed = np.random.SeedSequence(utt.fetch_seed())
         (rng_seed,) = rng_seed.spawn(1)
-        rng = aesara_rng.rng_ctor(rng_seed)
+        rng = aesara_rng.symbolic_rng_ctor(rng_seed)
 
         numpy_v = np.zeros((10, 2))
         for i in range(10):
@@ -2645,8 +2645,8 @@ class TestExamples:
 
         rng_seed = np.random.SeedSequence(utt.fetch_seed())
         (rng_seed_1, rng_seed_2) = rng_seed.spawn(2)
-        nrng1 = trng.rng_ctor(rng_seed_1)
-        nrng2 = trng.rng_ctor(rng_seed_2)
+        nrng1 = trng.symbolic_rng_ctor(rng_seed_1)
+        nrng2 = trng.symbolic_rng_ctor(rng_seed_2)
 
         def numpy_implementation(vsample):
             for idx in range(10):

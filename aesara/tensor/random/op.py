@@ -392,6 +392,9 @@ class AbstractRNGConstructor(Op):
         if seed is None:
             seed = NoneConst
         else:
+            if isinstance(seed, np.random.SeedSequence):
+                # TODO FIXME: Do something better than this.
+                seed = seed.generate_state(1)
             seed = as_tensor_variable(seed)
         inputs = [seed]
         outputs = [self.random_type()]

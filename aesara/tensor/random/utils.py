@@ -2,7 +2,7 @@ from collections.abc import Sequence
 from functools import wraps
 from itertools import zip_longest
 from types import ModuleType
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING, Callable, Optional, Union
 
 import numpy as np
 from typing_extensions import Literal
@@ -146,35 +146,29 @@ def normalize_size_param(
     return size
 
 
-class RandomStream:
-    """Module component with similar interface to `numpy.random.Generator`.
+class BaseRandomStream:
+    r"""Creates an interface similar to `numpy.random.Generator` for `RandomType`\s.
 
     Attributes
     ----------
     seed: None or int
         A default seed to initialize the `Generator` instances after build.
-    state_updates: list
-        A list of pairs of the form ``(input_r, output_r)``.  This will be
-        over-ridden by the module instance to contain stream generators.
     default_instance_seed: int
         Instance variable should take None or integer value. Used to seed the
         random number generator that provides seeds for member streams.
     gen_seedgen: numpy.random.Generator
         `Generator` instance that `RandomStream.gen` uses to seed new
         streams.
-    rng_ctor: type
-        Constructor used to create the underlying RNG objects.  The default
-        is `np.random.default_rng`.
+    symbolic_rng_ctor: type
+        Constructor used to create the underlying symbolic RNG objects.
 
     """
 
     def __init__(
         self,
-        seed: Optional[int] = None,
-        namespace: Optional[ModuleType] = None,
-        rng_ctor: Literal[
-            np.random.RandomState, np.random.Generator
-        ] = np.random.default_rng,
+        seed: Optional[int],
+        namespace: Optional[ModuleType],
+        symbolic_rng_ctor: Callable[[Optional[int]], Variable],
     ):
         if namespace is None:
             from aesara.tensor.random import basic  # pylint: disable=import-self
@@ -186,14 +180,7 @@ class RandomStream:
         self.default_instance_seed = seed
         self.state_updates = []
         self.gen_seedgen = np.random.SeedSequence(seed)
-
-        if isinstance(rng_ctor, type) and issubclass(rng_ctor, np.random.RandomState):
-
-            # The legacy state does not accept `SeedSequence`s directly
-            def rng_ctor(seed):
-                return np.random.RandomState(np.random.MT19937(seed))
-
-        self.rng_ctor = rng_ctor
+        self.symbolic_rng_ctor = symbolic_rng_ctor
 
     def __getattr__(self, obj):
 
@@ -218,35 +205,23 @@ class RandomStream:
         setattr(self, obj, meta_obj)
         return getattr(self, obj)
 
-    def updates(self):
-        return list(self.state_updates)
-
-    def seed(self, seed=None):
-        """
-        Re-initialize each random stream.
+    def seed(self, seed: Optional[int] = None) -> None:
+        """Reset the internal seed-generating process.
 
         Parameters
         ----------
-        seed : None or integer
+        seed
             Each random stream will be assigned a unique state that depends
             deterministically on this value.
-
-        Returns
-        -------
-        None
 
         """
         if seed is None:
             seed = self.default_instance_seed
 
         self.gen_seedgen = np.random.SeedSequence(seed)
-        old_r_seeds = self.gen_seedgen.spawn(len(self.state_updates))
-
-        for (old_r, new_r), old_r_seed in zip(self.state_updates, old_r_seeds):
-            old_r.set_value(self.rng_ctor(old_r_seed), borrow=True)
 
     def gen(self, op: "RandomVariable", *args, **kwargs) -> TensorVariable:
-        r"""Generate a draw from `op` seeded from this `RandomStream`.
+        r"""Generate a draw from `op` seeded by this `RandomStream`.
 
         Parameters
         ----------
@@ -270,10 +245,97 @@ class RandomStream:
 
         # Generate a new random state
         (seed,) = self.gen_seedgen.spawn(1)
-        rng = shared(self.rng_ctor(seed), borrow=True)
+
+        rng = self.symbolic_rng_ctor(seed)
 
         # Generate the sample
         out = op(*args, **kwargs, rng=rng)
+
+        return out
+
+
+class SharedRandomStream(BaseRandomStream):
+    r"""Creates an interface similar to `numpy.random.Generator` for shared `RandomType`\s.
+
+    Attributes
+    ----------
+    state_updates: list
+        A list of pairs of the form ``(input_r, output_r)``.  This will be
+        over-ridden by the module instance to contain stream generators.
+    numpy_rng_ctor: type
+        Constructor used to create the underlying NumPy RNG objects.  The
+        default is `np.random.default_rng`.
+
+    """
+
+    def __init__(
+        self,
+        seed: Optional[int] = None,
+        namespace: Optional[ModuleType] = None,
+        symbolic_rng_ctor: Optional[Callable[[Optional[int]], Variable]] = None,
+        rng_ctor: Literal[
+            np.random.RandomState, np.random.Generator
+        ] = np.random.default_rng,
+    ):
+        self.state_updates = []
+
+        if isinstance(rng_ctor, type) and issubclass(rng_ctor, np.random.RandomState):
+
+            # The legacy state does not accept `SeedSequence`s directly
+            def rng_ctor(seed):
+                return np.random.RandomState(np.random.MT19937(seed))
+
+        self.rng_ctor = rng_ctor
+
+        if symbolic_rng_ctor is None:
+
+            def symbolic_rng_ctor(seed):
+                return shared(self.rng_ctor(seed), borrow=True)
+
+        super().__init__(seed, namespace, symbolic_rng_ctor)
+
+    def updates(self):
+        return list(self.state_updates)
+
+    def seed(self, seed: Optional[None] = None) -> None:
+        """Re-initialize each random stream.
+
+        Parameters
+        ----------
+        seed
+            Each random stream will be assigned a unique state that depends
+            deterministically on this value.
+
+        """
+        super().seed(seed)
+
+        old_r_seeds = self.gen_seedgen.spawn(len(self.state_updates))
+
+        for (old_r, new_r), old_r_seed in zip(self.state_updates, old_r_seeds):
+            old_r.set_value(self.rng_ctor(old_r_seed), borrow=True)
+
+    def gen(self, op: "RandomVariable", *args, **kwargs) -> TensorVariable:
+        r"""Generate a draw from `op` seeded from this `RandomStream`.
+
+        Parameters
+        ----------
+        op
+            A `RandomVariable` instance
+        args
+            Positional arguments passed to `op`.
+        kwargs
+            Keyword arguments passed to `op`.
+
+        Returns
+        -------
+        The symbolic random draw performed by `op`.  This function stores
+        the updated `RandomType`\s for use at compile time.
+
+        """
+
+        out = super().gen(op, *args, **kwargs)
+
+        rng = out.owner.inputs[0]
 
         # This is the value that should be used to replace the old state
         # (i.e. `rng`) after `out` is sampled/evaluated.
@@ -286,3 +348,26 @@ class RandomStream:
         rng.default_update = new_rng
 
         return out
+
+
+# For backward compatibility
+RandomStream = SharedRandomStream
+
+
+def default_rng(seed: Optional[int] = None, shared: bool = True) -> BaseRandomStream:
+    """Construct a new Generator with the default BitGenerator (PCG64).
+
+    Parameters
+    ----------
+    seed
+        The initial seed value.
+    shared
+        If ``True``, create shared variable RNG objects.
+
+    """
+    if shared:
+        return SharedRandomStream(seed)
+    else:
+        from aesara.tensor.random.op import default_rng
+
+        return BaseRandomStream(seed, None, default_rng)
