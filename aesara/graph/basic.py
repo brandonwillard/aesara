@@ -2,6 +2,7 @@
 import abc
 import warnings
 from collections import deque
+from contextlib import contextmanager
 from copy import copy
 from itertools import count
 from typing import (
@@ -26,6 +27,7 @@ from typing import (
     Union,
     cast,
 )
+from weakref import WeakKeyDictionary
 
 import numpy as np
 
@@ -55,6 +57,23 @@ _IdType = TypeVar("_IdType", bound=Hashable)
 T = TypeVar("T", bound="Node")
 NoParams = object()
 NodeAndChildren = Tuple[T, Optional[Iterable[T]]]
+
+
+# Use a "default" context
+# TODO: The default context can be the `Apply` object itself, so that the
+# context lookups are only ever used when the default isn't.
+__graph_context__: WeakKeyDictionary["Apply", List["Variable"]] = WeakKeyDictionary()
+
+
+@contextmanager
+def set_input_context(context):
+    global __graph_context__
+    last_context = __graph_context__
+    __graph_context__ = context
+    try:
+        yield
+    finally:
+        __graph_context__ = last_context
 
 
 class Node(MetaObject):
@@ -125,17 +144,21 @@ class Apply(Node, Generic[OpType]):
             raise TypeError("The output of an Apply must be a sequence type")
 
         self.op = op
-        self.inputs: List[Variable] = []
         self.tag = Scratchpad()
 
+        input_types: Tuple["Type", ...] = ()
         # filter inputs to make sure each element is a Variable
         for input in inputs:
             if isinstance(input, Variable):
-                self.inputs.append(input)
+                input_types += (input.type,)
             else:
                 raise TypeError(
                     f"The 'inputs' argument to Apply must contain Variable instances, not {input}"
                 )
+
+        self.input_types = input_types
+        self.signature = self
+
         self.outputs: List[Variable] = []
         # filter outputs to make sure each element is a Variable
         for i, output in enumerate(outputs):
@@ -153,6 +176,22 @@ class Apply(Node, Generic[OpType]):
                     f"The 'outputs' argument to Apply must contain Variable instances with no owner, not {output}"
                 )
 
+        __graph_context__[self.signature] = list(inputs)
+
+    @property
+    def inputs(self):
+        return __graph_context__[self.signature]
+
+    @inputs.setter
+    def inputs(self, val):
+        if __graph_context__ is None:
+            raise ValueError("No context set for ContextualApply nodes")
+
+        if not all(v.type == in_type for v, in_type in zip(val, self.input_types)):
+            raise ValueError(f"Inputs must match types {self.input_types}")
+
+        __graph_context__[self.signature] = val
+
     def run_params(self):
         """
         Returns the params for the node, or NoParams if no params is set.
@@ -165,6 +204,8 @@ class Apply(Node, Generic[OpType]):
 
     def __getstate__(self):
         d = self.__dict__
+        d["inputs"] = self.inputs
+
         # ufunc don't pickle/unpickle well
         if hasattr(self.tag, "ufunc"):
             d = copy(self.__dict__)
@@ -172,6 +213,10 @@ class Apply(Node, Generic[OpType]):
             del t.ufunc
             d["tag"] = t
         return d
+
+    def __setstate__(self, d):
+        self.__dict__.update(d)
+        __graph_context__[self] = d["inputs"]
 
     def default_output(self):
         """
@@ -201,10 +246,15 @@ class Apply(Node, Generic[OpType]):
         return self.outputs[do]
 
     def __str__(self):
-        return op_as_string(self.inputs, self)
+        return node_as_string(self.inputs, self)
 
     def __repr__(self):
-        return str(self)
+        if self.signature in __graph_context__:
+            _inputs = __graph_context__[self.signature]
+        else:
+            _inputs = self.input_types
+
+        return f"{type(self).__name__}({self.op}, {_inputs}, {self.outputs})"
 
     def clone(self, clone_inner_graph: bool = False) -> "Apply[OpType]":
         r"""Clone this `Apply` instance.
@@ -1460,12 +1510,15 @@ def io_connection_pattern(inputs, outputs):
     return global_connection_pattern
 
 
-def op_as_string(
-    i, op, leaf_formatter=default_leaf_formatter, node_formatter=default_node_formatter
-):
-    """Return a function that returns a string representation of the subgraph between `i` and :attr:`op.inputs`"""
-    strs = as_string(i, op.inputs, leaf_formatter, node_formatter)
-    return node_formatter(op, strs)
+def node_as_string(
+    i: List[Variable],
+    node: Apply,
+    leaf_formatter=default_leaf_formatter,
+    node_formatter: Callable[[Apply, List[str]], List[str]] = default_node_formatter,
+) -> List[str]:
+    """Return a function that returns a string representation of the subgraph between `i` and `node.inputs`."""
+    strs = as_string(i, node.inputs, leaf_formatter, node_formatter)
+    return node_formatter(node, strs)
 
 
 def as_string(
@@ -1478,19 +1531,18 @@ def as_string(
 
     Parameters
     ----------
-    inputs : list
+    inputs
         Input `Variable`\s.
-    outputs : list
+    outputs
         Output `Variable`\s.
-    leaf_formatter : callable
+    leaf_formatter
         Takes a `Variable` and returns a string to describe it.
-    node_formatter : callable
-        Takes an `Op` and the list of strings corresponding to its arguments
+    node_formatter
+        Takes an `Apply` and the list of strings corresponding to its arguments
         and returns a string to describe it.
 
     Returns
     -------
-    list of str
         Returns a string representation of the subgraph between `inputs` and
         `outputs`. If the same node is used by several other nodes, the first
         occurrence will be marked as :literal:`*n -> description` and all
@@ -1506,41 +1558,41 @@ def as_string(
     multi = set()
     seen = set()
     for output in outputs:
-        op = output.owner
-        if op in seen:
-            multi.add(op)
+        node = output.owner
+        if node in seen:
+            multi.add(node)
         else:
-            seen.add(op)
-    for op in applys_between(i, outputs):
-        for input in op.inputs:
-            op2 = input.owner
-            if input in i or input in orph or op2 is None:
+            seen.add(node)
+    for node in applys_between(i, outputs):
+        for input in node.inputs:
+            node_2 = input.owner
+            if input in i or input in orph or node_2 is None:
                 continue
-            if op2 in seen:
-                multi.add(op2)
+            if node_2 in seen:
+                multi.add(node_2)
             else:
                 seen.add(input.owner)
     multi_list = [x for x in multi]
-    done: Set = set()
+    done = set()
 
     def multi_index(x):
         return multi_list.index(x) + 1
 
     def describe(r):
         if r.owner is not None and r not in i and r not in orph:
-            op = r.owner
-            idx = op.outputs.index(r)
-            if len(op.outputs) == 1:
+            node = r.owner
+            idx = node.outputs.index(r)
+            if len(node.outputs) == 1:
                 idxs = ""
             else:
                 idxs = f"::{idx}"
-            if op in done:
-                return f"*{multi_index(op)}{idxs}"
+            if node in done:
+                return f"*{multi_index(node)}{idxs}"
             else:
-                done.add(op)
-                s = node_formatter(op, [describe(input) for input in op.inputs])
-                if op in multi_list:
-                    return f"*{multi_index(op)} -> {s}"
+                done.add(node)
+                s = node_formatter(node, [describe(input) for input in node.inputs])
+                if node in multi_list:
+                    return f"*{multi_index(node)} -> {s}"
                 else:
                     return s
         else:

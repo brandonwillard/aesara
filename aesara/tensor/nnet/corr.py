@@ -229,25 +229,25 @@ class BaseCorrMM(OpenMPOp, _NoPythonOp):
         # raise this whenever modifying any of the support_code_files
         return (10, self.openmp, blas_header_version())
 
-    def c_support_code_apply(self, node, nodename):
+    def c_support_code_apply(self, node: Apply, nodename):
         # REMEMBER TO RAISE c_code_cache_version when changing any of
         # these files
         sub = {}
-        dtype = str(node.__dict__["inputs"][0].dtype)
+        dtype = str(node.inputs[0].dtype)
         assert dtype in ("float32", "float64")
         if dtype == "float32":
             sub["gemm"] = "sgemm_"
             sub["gemv"] = "sgemv_"
             sub["float_type"] = "npy_float"
             sub["float_typenum"] = "NPY_FLOAT"
-            sub["n_bytes"] = 4
+            sub["n_bytes"] = "4"
             sub["c_float_type"] = "float"
         else:
             sub["gemm"] = "dgemm_"
             sub["gemv"] = "dgemv_"
             sub["float_type"] = "npy_double"
             sub["float_typenum"] = "NPY_DOUBLE"
-            sub["n_bytes"] = 8
+            sub["n_bytes"] = "8"
             sub["c_float_type"] = "double"
 
         if self.openmp:

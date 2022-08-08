@@ -156,12 +156,19 @@ class TestClone(X):
     def test_not_destructive(self):
         # Checks that manipulating a cloned graph leaves the original unchanged.
         r1, r2, r5 = MyVariable(1), MyVariable(2), MyVariable(5)
+
         node = MyOp.make_node(MyOp.make_node(r1, r2).outputs[0], r5)
-        _, new = clone([r1, r2, r5], node.outputs, False)
+
+        _, new = clone([r1, r2, r5], node.outputs, copy_inputs=False)
+
         new_node = new[0].owner
-        new_node.inputs = [MyVariable(7), MyVariable(8)]
+
+        new_inputs = [i.clone() for i in new_node.inputs]
+        assert new_inputs != new_node.inputs
+
+        new_node.inputs = new_inputs
         assert self.str(graph_inputs(new_node.outputs), new_node.outputs) == [
-            "MyOp(R7, R8)"
+            "MyOp(R3, R5)"
         ]
         assert self.str(graph_inputs(node.outputs), node.outputs) == [
             "MyOp(MyOp(R1, R2), R5)"
@@ -169,10 +176,16 @@ class TestClone(X):
 
     def test_constant(self):
         r1, r2, r5 = MyVariable(1), MyVariable(2), MyVariable(5)
+
         node = MyOp.make_node(MyOp.make_node(r1, r2).outputs[0], r5)
-        _, new = clone([r1, r2, r5], node.outputs, False)
+
+        _, new = clone([r1, r2, r5], node.outputs, copy_inputs=False)
+
         new_node = new[0].owner
-        new_node.inputs = [MyVariable(7), MyVariable(8)]
+        new_inputs = [i.clone() for i in new_node.inputs]
+        assert new_inputs != new_node.inputs
+        new_node.inputs
+
         c1 = at.constant(1.5)
 
         i, o = clone([c1], [c1])
