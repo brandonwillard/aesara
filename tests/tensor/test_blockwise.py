@@ -15,13 +15,6 @@ from aesara.tensor.type import TensorType
 from tests.unittest_tools import check_infer_shape, verify_grad
 
 
-class DotBW(Dot):
-    gufunc_sig = ((("m", "n"), ("n", "p")), (("m", "p"),))
-
-
-dot_bw = DotBW()
-
-
 def test_update_dim_sizes():
     with pytest.raises(ValueError, match=".*dimensional argument.*"):
         _update_dim_sizes({}, at.tensor("float64", ()), ("m",))
@@ -79,7 +72,7 @@ def test_parse_input_dimensions(args, arg_vals, input_core_dims, output_core_dim
     "op, args, arg_vals, np_fn",
     [
         (
-            dot_bw,
+            Dot(),
             (
                 at.tensor("float64", (None, None, None)),
                 at.tensor("float64", (None, None, None)),
@@ -88,7 +81,7 @@ def test_parse_input_dimensions(args, arg_vals, input_core_dims, output_core_dim
             lambda x, y: np.dot(x, y),
         ),
         (
-            dot_bw,
+            Dot(),
             (
                 at.tensor("float64", (None, None, None)),
                 at.tensor("float64", (None, None)),
@@ -116,10 +109,10 @@ def test_Blockwise_perform(op, args, arg_vals, np_fn):
 @pytest.mark.parametrize(
     "op, s_left, s_right",
     [
-        (dot_bw, (3, 5, 6), (3, 6, 7)),
-        (dot_bw, (3, 1, 2), (3, 2, 1)),
+        (Dot(), (3, 5, 6), (3, 6, 7)),
+        (Dot(), (3, 1, 2), (3, 2, 1)),
         (
-            dot_bw,
+            Dot(),
             (5, 4, 3),
             (
                 3,
@@ -146,7 +139,7 @@ def test_Blockwise_infer_shape(op, s_left, s_right):
     "op, args, arg_vals, np_fn",
     [
         (
-            dot_bw,
+            Dot(),
             (
                 at.tensor("float64", (None, None, None)),
                 at.tensor("float64", (None, None, None)),
@@ -155,7 +148,7 @@ def test_Blockwise_infer_shape(op, s_left, s_right):
             lambda x, y: np.dot(x, y),
         ),
         (
-            dot_bw,
+            Dot(),
             (
                 at.tensor("float64", (None, None, None)),
                 at.tensor("float64", (None, None)),
